@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Contract, JsonRpcProvider, formatUnits } from "ethers";
 import { useCircleWallet } from "../circle-wallet-context";
 import { AuthGate } from "../auth-gate";
 import { SendModal } from "./send-modal";
@@ -13,23 +12,6 @@ import WalletLoading from "./loading";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 
 const ARC_EXPLORER = process.env.NEXT_PUBLIC_ARC_EXPLORER_URL || "https://testnet.arcscan.app/tx/";
-const ARC_RPC_URL = process.env.NEXT_PUBLIC_ARC_RPC_URL || "https://rpc.testnet.arc.network";
-const USDC_ADDRESS = process.env.NEXT_PUBLIC_USDC_TOKEN_ADDRESS || "0x3600000000000000000000000000000000000000";
-const EURC_ADDRESS = process.env.NEXT_PUBLIC_EURC_TOKEN_ADDRESS || "";
-const CIRBTC_ADDRESS = process.env.NEXT_PUBLIC_CIRBTC_TOKEN_ADDRESS || "";
-
-const ERC20_ABI = [
-  "function balanceOf(address owner) view returns (uint256)",
-  "function decimals() view returns (uint8)",
-];
-
-// Approximate USD rates for total balance display (display only, not for math)
-const TOKEN_USD_RATES: Record<string, number> = {
-  USDC: 1.0,
-  EURC: 1.08,
-  cirBTC: 100_000,
-};
-
 export default function WalletPage() {
   const { status, session, error, clearError, startCircleFlow, registerName, logout } = useCircleWallet();
   const [name, setName] = useState("");
@@ -39,6 +21,7 @@ export default function WalletPage() {
   const [balance, setBalance] = useState<string | null>(null);
   const [tokenBalances, setTokenBalances] = useState<TokenBalance[]>([]);
   const [balanceLoading, setBalanceLoading] = useState(false);
+  const [balanceError, setBalanceError] = useState<string | null>(null);
   const [copiedAddress, setCopiedAddress] = useState(false);
   const [showReceive, setShowReceive] = useState(false);
   const [showSend, setShowSend] = useState(false);
@@ -151,12 +134,21 @@ export default function WalletPage() {
           filter: `id=eq.${session.userId}`,
         },
         (payload) => {
-          // The webhook writes balance_cache_usdc directly; mirror it into
-          // the displayed balance immediately so we don't wait the 15s
-          // polling cycle.
+          // The hero uses `tokenBalances` to calculate its USD total, not
+          // the legacy `balance` field alone. Keep both in sync; previously
+          // this only updated `balance`, so a successful main-wallet webhook
+          // left the visible total stale until the next poll.
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const next = (payload.new as any)?.balance_cache_usdc;
-          if (typeof next === "string") setBalance(next);
+          if (typeof next === "string") {
+            setBalance(next);
+            setBalanceError(null);
+            setTokenBalances((current) => current.map((token) =>
+              token.symbol === "USDC"
+                ? { ...token, amount: next, usdValue: parseFloat(next) || 0 }
+                : token,
+            ));
+          }
         }
       )
       .subscribe();
@@ -170,72 +162,23 @@ export default function WalletPage() {
     if (!session?.walletAddress) return;
     let cancelled = false;
 
-    const TOKEN_CONFIG: { symbol: string; name: string; address: string }[] = [
-      { symbol: "USDC", name: "USD Coin", address: USDC_ADDRESS },
-      ...(EURC_ADDRESS ? [{ symbol: "EURC", name: "Euro Coin", address: EURC_ADDRESS }] : []),
-      ...(CIRBTC_ADDRESS ? [{ symbol: "cirBTC", name: "Circle BTC", address: CIRBTC_ADDRESS }] : []),
-    ];
-
     const fetchBalances = async () => {
       setBalanceLoading(true);
       try {
-        // Server-side read first — avoids the browser→Arc-RPC CORS/flakiness
-        // that was leaving the main wallet showing a blank/zero balance.
-        try {
-          const r = await fetch("/api/wallet/balance");
-          if (r.ok) {
-            const d = await r.json();
-            if (!cancelled && Array.isArray(d.tokenBalances) && !d.stale) {
-              setTokenBalances(d.tokenBalances as TokenBalance[]);
-              setBalance(typeof d.balanceUsdc === "string" ? d.balanceUsdc : "0");
-              return;
-            }
-          }
-        } catch {
-          // fall through to the direct client-side RPC read below
+        const r = await fetch("/api/wallet/balance");
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || !Array.isArray(d.tokenBalances)) {
+          throw new Error(d.error || "Couldn't refresh your wallet balance.");
         }
-
-        const provider = new JsonRpcProvider(ARC_RPC_URL);
-        const results: TokenBalance[] = [];
-
-        await Promise.all(
-          TOKEN_CONFIG.map(async (cfg) => {
-            try {
-              const contract = new Contract(cfg.address, ERC20_ABI, provider);
-              const [raw, decimals] = await Promise.all([
-                contract.balanceOf(session.walletAddress) as Promise<bigint>,
-                contract.decimals() as Promise<bigint>,
-              ]);
-              const amount = formatUnits(raw, decimals);
-              const rate = TOKEN_USD_RATES[cfg.symbol] ?? 0;
-              results.push({
-                symbol: cfg.symbol,
-                name: cfg.name,
-                address: cfg.address,
-                amount,
-                decimals: Number(decimals),
-                usdValue: parseFloat(amount) * rate,
-              });
-              if (cfg.symbol === "USDC" && !cancelled) {
-                setBalance(amount);
-              }
-            } catch {
-              results.push({
-                symbol: cfg.symbol,
-                name: cfg.name,
-                address: cfg.address,
-                amount: "0",
-                decimals: 6,
-                usdValue: 0,
-              });
-              if (cfg.symbol === "USDC" && !cancelled) setBalance("0");
-            }
-          })
-        );
-
-        if (!cancelled) setTokenBalances(results);
+        if (!cancelled) {
+          setTokenBalances(d.tokenBalances as TokenBalance[]);
+          setBalance(typeof d.balanceUsdc === "string" ? d.balanceUsdc : "0");
+          setBalanceError(null);
+        }
       } catch {
-        if (!cancelled) setBalance("0");
+        // Preserve the last known balance. A failed read is not evidence that
+        // the wallet is empty, so never overwrite it with a fabricated zero.
+        if (!cancelled) setBalanceError("Balance temporarily unavailable");
       } finally {
         if (!cancelled) setBalanceLoading(false);
       }
@@ -469,6 +412,7 @@ export default function WalletPage() {
         walletAddress={session.walletAddress}
         balanceUsdc={balanceForShell}
         balanceLoading={balanceLoading && balance === null}
+        balanceError={balanceError}
         tokenBalances={tokenBalances}
         totalUsdValue={totalUsdValue}
         agentActivated={agentActivated}
@@ -521,17 +465,7 @@ export default function WalletPage() {
             // Don't close the modal here — the user needs to see the
             // "Transaction submitted!" screen and click "Done". We just
             // refresh the balance in the background.
-            if (session?.walletAddress) {
-              try {
-                const provider = new JsonRpcProvider(ARC_RPC_URL);
-                const usdc = new Contract(USDC_ADDRESS, ERC20_ABI, provider);
-                const [raw, decimals] = await Promise.all([
-                  usdc.balanceOf(session.walletAddress) as Promise<bigint>,
-                  usdc.decimals() as Promise<bigint>,
-                ]);
-                setBalance(formatUnits(raw, decimals));
-              } catch {}
-            }
+            // The regular Circle-backed polling loop refreshes the balance.
           }}
         />
       )}

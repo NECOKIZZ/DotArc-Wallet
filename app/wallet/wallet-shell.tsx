@@ -86,6 +86,7 @@ export interface WalletShellProps {
   walletAddress: string;
   balanceUsdc: string;          // formatted decimal, e.g. "12.34"
   balanceLoading: boolean;
+  balanceError: string | null;
   tokenBalances: TokenBalance[];
   totalUsdValue: number;        // total USD across all tokens
   agentActivated: boolean | null;
@@ -108,6 +109,7 @@ export function WalletShell(props: WalletShellProps) {
     email,
     walletAddress,
     balanceLoading,
+    balanceError,
     tokenBalances,
     totalUsdValue,
     activity,
@@ -231,6 +233,7 @@ export function WalletShell(props: WalletShellProps) {
                   intPart={intPart}
                   fracPart={fracPart}
                   balanceLoading={balanceLoading}
+                  balanceError={balanceError}
                   tokenBalances={tokenBalances}
                   qrDataUrl={qrDataUrl}
                   onReceive={onReceive}
@@ -467,6 +470,7 @@ function HomeTab(props: {
   intPart: string;
   fracPart: string;
   balanceLoading: boolean;
+  balanceError: string | null;
   tokenBalances: TokenBalance[];
   qrDataUrl: string | null;
   onSend: () => void;
@@ -477,7 +481,7 @@ function HomeTab(props: {
   copiedAddress: boolean;
 }) {
   const {
-    displayName, arcName, intPart, fracPart, balanceLoading, tokenBalances, qrDataUrl,
+    displayName, arcName, intPart, fracPart, balanceLoading, balanceError, tokenBalances, qrDataUrl,
     onSend, onReceive, onShowQr, onRequest, onCopyAddress, copiedAddress,
   } = props;
 
@@ -527,8 +531,10 @@ function HomeTab(props: {
             </div>
 
             <div className="mt-3 flex items-baseline gap-2">
-              {balanceLoading && !intPart ? (
+              {balanceLoading ? (
                 <div className="h-10 w-32 animate-pulse rounded-lg bg-white/10 sm:h-12 sm:w-44 md:h-16 md:w-56" />
+              ) : balanceError ? (
+                <span className="font-geist text-base text-white/70">{balanceError}</span>
               ) : (
                 <>
                   <span
@@ -621,6 +627,8 @@ function HomeTab(props: {
         <div className="flex flex-col gap-2">
           {tokenBalances.length === 0 && balanceLoading ? (
             <div className="h-14 animate-pulse rounded-2xl bg-white/10" />
+          ) : tokenBalances.length === 0 && balanceError ? (
+            <p className="px-2 py-3 text-sm text-white/65">{balanceError}</p>
           ) : (
             tokenBalances.map((t) => (
               <TokenRow key={t.symbol} token={t} />

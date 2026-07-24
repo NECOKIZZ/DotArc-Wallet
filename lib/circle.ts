@@ -375,6 +375,35 @@ export async function getUserWallet(
   };
 }
 
+/**
+ * Read the token balances for a user-controlled wallet from Circle.
+ *
+ * This deliberately uses Circle's wallet API instead of making the browser
+ * (or a separate RPC provider) reconstruct the balance from an address. The
+ * address belongs to a user-controlled wallet and Circle is the authority that
+ * created and tracks it; using this path keeps the main-wallet balance on the
+ * same reliable data source as the agent-wallet balance.
+ */
+export async function getUserWalletTokenBalances(userId: string): Promise<unknown[]> {
+  if (!circleUser) throw new Error("Circle user client not configured");
+
+  const wallet = await getUserWallet(userId);
+  if (!wallet) throw new Error("Circle wallet not found");
+
+  const tokenRes = await circleRead("createUserToken(main-balance)", () =>
+    circleUser!.createUserToken({ userId }),
+  );
+  const userToken = tokenRes.data?.userToken;
+  if (!userToken) throw new Error("Failed to create user token for balance lookup");
+
+  const balancesRes = await circleRead("getWalletTokenBalance(main)", () =>
+    // The user-controlled SDK accepts a short-lived user token for this
+    // read. It never leaves the server.
+    circleUser!.getWalletTokenBalance({ walletId: wallet.id, userToken }),
+  );
+  return balancesRes.data?.tokenBalances ?? [];
+}
+
 // ── User send (USDC) ─────────────────────────────────────────────────
 
 export type PrepareSendResult = {
